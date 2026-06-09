@@ -1,9 +1,118 @@
-function setupRealtimeListeners() {
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>リアルタイム予約・運行管理システム</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap');
+        body {
+            font-family: 'Inter', 'Noto Sans JP', sans-serif;
+            background-color: #f8fafc;
+        }
+        .bg-pastel-green {
+            background-color: #f0fdf4 !important;
+        }
+        .bg-pastel-green:hover {
+            background-color: #dcfce7 !important;
+        }
+    </style>
+</head>
+<body class="text-slate-800 antialiased min-h-screen flex flex-col">
+
+    <script id="firebase-config-script">
+        const firebaseConfig = {
+            apiKey: "AIzaSyBKPgBROp1b-ONmSOc6qMRozs-_Pm5pbJ0",
+            authDomain: "auto-rent-system-52efe.firebaseapp.com",
+            projectId: "auto-rent-system-52efe",
+            storageBucket: "auto-rent-system-52efe.firebasestorage.app",
+            messagingSenderId: "516757126612",
+            appId: "1:516757126612:web:2955f27d5266efbac86a41"
+        };
+    </script>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getFirestore, doc, onSnapshot, setDoc, collection, query, orderBy } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+        import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+
+        // グローバル状態管理
+        window.firebaseApp = null;
+        window.db = null;
+        window.currentConfig = firebaseConfig;
+
+        // 音声通知（ピンポーン♪）の設定
+        const chimeAudio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-600.wav');
+
+        function playChime() {
+            chimeAudio.play().catch(e => console.log("Audio play blocked or failed:", e));
+        }
+
+        // マスキング処理（苗字のみ、車番下4桁のみ表示）
+        function maskName(name) {
+            if (!name) return "";
+            const parts = name.split(/[\s ]+/);
+            if (parts.length > 0) return parts[0];
+            return name;
+        }
+
+        function maskCarNumber(num) {
+            if (!num) return "";
+            const match = num.match(/\d+$/);
+            if (match) return `* ${match[0].slice(-4)}`;
+            return "***" + num.slice(-2);
+        }
+
+        // Firebaseの初期化
+        async function initFirebase() {
+            try {
+                window.firebaseApp = initializeApp(window.currentConfig);
+                window.db = getFirestore(window.firebaseApp);
+                const auth = getAuth(window.firebaseApp);
+                
+                await signInAnonymously(auth);
+                
+                updateCloudStatus(true);
+                setupRealtimeListeners();
+            } catch (error) {
+                console.error("Firebase init error:", error);
+                updateCloudStatus(false);
+                loadLocalData();
+            }
+        }
+
+        function updateCloudStatus(isLive) {
+            const statusIndicator = document.getElementById('cloud-status');
+            const statusText = document.getElementById('cloud-status-text');
+            const sheetTitle = document.getElementById('sheet-title');
+
+            if (isLive) {
+                statusIndicator.className = "h-2.5 w-2.5 rounded-full bg-emerald-500 ring-4 ring-emerald-100 animate-pulse";
+                statusText.innerText = "CLOUD LIVE";
+                statusText.className = "text-xs font-bold text-emerald-600 tracking-wider";
+                if (sheetTitle) sheetTitle.innerText = "リアルタイムクラウド共有シート";
+            } else {
+                statusIndicator.className = "h-2.5 w-2.5 rounded-full bg-amber-500 ring-4 ring-amber-100";
+                statusText.innerText = "LOCAL MODE";
+                statusText.className = "text-xs font-bold text-amber-600 tracking-wider";
+                if (sheetTitle) sheetTitle.innerText = "ローカルスタンドアロンシート";
+            }
+        }
+
+        // サンプルデータ
+        let localReservations = [
+            { id: "1", time: "09:00", name: "山田 太郎", car: "プリウス 豊橋500 あ 12-34", status: "出発済", note: "スタッドレス指定" },
+            { id: "2", time: "10:30", name: "佐藤 美咲", car: "ヤリス 名古屋300 た 56-78", status: "対応中", note: "チャイルドシート1台" },
+            { id: "3", time: "13:00", name: "鈴木 一郎", car: "アクア 尾張小牧500 さ 90-12", status: "予約数", note: "" }
+        ];
+
+        // 🌟 リアルタイム監視（来店・対応中のみ音が鳴るように判定するロジック）
+        function setupRealtimeListeners() {
             const q = query(collection(window.db, "reservations"));
             let isFirstLoad = true;
-            
-            // ⭐ 前回の状態を記憶するための臨時の箱
-            let previousStatuses = {};
+            let previousStatuses = {}; // 前回のステータスを記憶する箱
 
             onSnapshot(q, (snapshot) => {
                 let data = [];
@@ -14,30 +123,294 @@ function setupRealtimeListeners() {
                     const id = doc.id;
                     data.push({ id: id, ...currentData });
 
-                    // 最初の読み込み（画面を開いた瞬間）は音を鳴らさない
+                    // 画面を開いた最初の1回目（初回読み込み）は音を鳴らさない
                     if (!isFirstLoad) {
                         const oldStatus = previousStatuses[id];
                         const newStatus = currentData.status;
 
-                        // ⭐【ここが重要】「前の状態が対応中ではなく」かつ「新しい状態が対応中になった」ときだけフラグをONにする
+                        // 【ここが来店限定の判定】前が「対応中」ではなく、今回「対応中」に変わった場合のみ
                         if (oldStatus !== "対応中" && newStatus === "対応中") {
                             triggerChime = true;
                         }
                     }
 
-                    // 最新のステータスを記憶しておく
+                    // 今回の状態を記憶
                     previousStatuses[id] = currentData.status;
                 });
+
+                if (data.length === 0 && isFirstLoad) {
+                    localReservations.forEach(async (res) => {
+                        await setDoc(doc(window.db, "reservations", res.id), res);
+                    });
+                    return;
+                }
 
                 data.sort((a, b) => a.time.localeCompare(b.time));
                 localReservations = data;
                 
-                // 画面を開いた初回以外で、かつ「対応中」への変化があった場合のみ音を鳴らす
+                // 初回読み込み以外で、かつ「対応中（来店）」への変更を検知したときだけ音を鳴らす
                 if (!isFirstLoad && triggerChime) {
                     playChime(); 
                 }
                 isFirstLoad = false;
                 
                 renderData();
+            }, (error) => {
+                console.error("Snapshot error, falling back to local:", error);
+                updateCloudStatus(false);
+                renderData();
             });
         }
+
+        function loadLocalData() {
+            const saved = localStorage.getItem('auto_rent_reservations');
+            if (saved) {
+                localReservations = JSON.parse(saved);
+            }
+            renderData();
+        }
+
+        function saveLocalData() {
+            localStorage.setItem('auto_rent_reservations', JSON.stringify(localReservations));
+            if (!window.db) {
+                renderData();
+            }
+        }
+
+        async function updateStatus(id, newStatus) {
+            if (window.db) {
+                await setDoc(doc(window.db, "reservations", id), { status: newStatus }, { merge: true });
+            } else {
+                const idx = localReservations.findIndex(r => r.id === id);
+                if (idx !== -1) {
+                    localReservations[idx].status = newStatus;
+                    saveLocalData();
+                }
+            }
+        }
+
+        async function addReservation(e) {
+            e.preventDefault();
+            const time = document.getElementById('form-time').value;
+            const name = document.getElementById('form-name').value;
+            const car = document.getElementById('form-car').value;
+            const note = document.getElementById('form-note').value;
+            const id = Date.now().toString();
+
+            const newRes = { id, time, name, car, status: "予約数", note };
+
+            if (window.db) {
+                await setDoc(doc(window.db, "reservations", id), newRes);
+            } else {
+                localReservations.push(newRes);
+                localReservations.sort((a, b) => a.time.localeCompare(b.time));
+                saveLocalData();
+            }
+            document.getElementById('res-form').reset();
+        }
+
+        window.updateStatus = updateStatus;
+        window.addReservation = addReservation;
+
+        function renderData() {
+            const tbody = document.getElementById('reservation-tbody');
+            tbody.innerHTML = "";
+
+            let countTotal = 0;
+            let countActive = 0;
+            let countDone = 0;
+
+            localReservations.forEach((res) => {
+                countTotal++;
+                if (res.status === "対応中") countActive++;
+                if (res.status === "出発済") countDone++;
+
+                let rowClass = "border-b border-slate-100 hover:bg-slate-50 transition-colors";
+                if (res.status === "対応中") {
+                    rowClass = "bg-pastel-green border-b border-emerald-100";
+                } else if (res.status === "出発済") {
+                    rowClass = "bg-slate-50 opacity-60 border-b border-slate-100";
+                }
+
+                const tr = document.createElement('tr');
+                tr.className = rowClass;
+                tr.innerHTML = `
+                    <td class="px-6 py-4 font-semibold text-slate-700 whitespace-nowrap">${res.time}</td>
+                    <td class="px-6 py-4 font-medium text-slate-900 whitespace-nowrap max-w-[180px] truncate" title="${res.name}">
+                        <div class="flex items-center gap-2">
+                            <span>${maskName(res.name)}</span>
+                            <span class="text-xs text-slate-400 font-normal border border-slate-200 px-1.5 py-0.5 rounded">非公開</span>
+                        </div>
+                    </td>
+                    <td class="px-6 py-4 text-slate-600 whitespace-nowrap max-w-[220px] truncate" title="${res.car}">
+                        <div class="flex items-center gap-2">
+                            <i data-lucide="car" class="h-4 w-4 text-slate-400"></i>
+                            <span>${maskCarNumber(res.car)}</span>
+                        </div>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <div class="flex gap-1.5">
+                            <button onclick="updateStatus('${res.id}', '予約数')" class="px-3 py-1 rounded-full text-xs font-semibold border ${res.status === '予約数' ? 'bg-blue-50 border-blue-500 text-blue-600 shadow-xs' : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50'} transition-all cursor-pointer">予約数</button>
+                            <button onclick="updateStatus('${res.id}', '対応中')" class="px-3 py-1 rounded-full text-xs font-semibold border ${res.status === '対応中' ? 'bg-emerald-50 border-emerald-500 text-emerald-600 shadow-xs' : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50'} transition-all cursor-pointer">対応中</button>
+                            <button onclick="updateStatus('${res.id}', '出発済')" class="px-3 py-1 rounded-full text-xs font-semibold border ${res.status === '出発済' ? 'bg-slate-200 border-slate-400 text-slate-700 shadow-xs' : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50'} transition-all cursor-pointer">出発済</button>
+                        </div>
+                    </td>
+                    <td class="px-6 py-4 text-slate-500 max-w-[240px] truncate" title="${res.note}">${res.note || '<span class="text-slate-300">-</span>'}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            // メーター値の更新
+            document.getElementById('stat-total').innerText = countTotal;
+            document.getElementById('stat-active').innerText = countActive;
+            document.getElementById('stat-done').innerText = countDone;
+
+            const progress = countTotal > 0 ? Math.round((countDone / countTotal) * 100) : 0;
+            document.getElementById('stat-progress').innerText = progress + "%";
+            document.getElementById('stat-progress-bar').style.width = progress + "%";
+
+            lucide.createIcons();
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            initFirebase();
+            document.getElementById('res-form').addEventListener('submit', window.addReservation);
+        });
+    </script>
+
+    <header class="bg-white border-b border-slate-200 sticky top-0 z-50">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="p-2 bg-indigo-50 rounded-xl text-indigo-600">
+                    <i data-lucide="layout-dashboard" class="h-6 w-6"></i>
+                </div>
+                <div>
+                    <h1 class="text-lg font-bold text-slate-900 tracking-tight">リアルタイム予約・運行状況モニター</h1>
+                    <p class="text-xs text-slate-500 font-medium">Auto-Rent Multi-Device Terminal</p>
+                </div>
+            </div>
+            
+            <div class="bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-full flex items-center gap-2.5 shadow-2xs">
+                <span id="cloud-status" class="h-2.5 w-2.5 rounded-full bg-slate-300"></span>
+                <span id="cloud-status-text" class="text-xs font-bold text-slate-400 tracking-wider">CONNECTING...</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="flex-grow max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+        
+        <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs flex items-center gap-4">
+                <div class="p-3.5 bg-blue-50 text-blue-600 rounded-xl">
+                    <i data-lucide="calendar-range" class="h-6 w-6"></i>
+                </div>
+                <div>
+                    <p class="text-xs font-semibold text-slate-400 uppercase tracking-wider">本日予約数</p>
+                    <p id="stat-total" class="text-2xl font-bold text-slate-900 mt-0.5">0</p>
+                </div>
+            </div>
+
+            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs flex items-center gap-4">
+                <div class="p-3.5 bg-emerald-50 text-emerald-600 rounded-xl flex items-center justify-center">
+                    <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+                        <circle cx="9" cy="7" r="4" />
+                        <path d="M19 16v6M22 19h-6" />
+                    </svg>
+                </div>
+                <div>
+                    <p class="text-xs font-semibold text-slate-400 uppercase tracking-wider">対応中</p>
+                    <p id="stat-active" class="text-2xl font-bold text-slate-900 mt-0.5">0</p>
+                </div>
+            </div>
+
+            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs flex items-center gap-4">
+                <div class="p-3.5 bg-slate-100 text-slate-600 rounded-xl">
+                    <i data-lucide="navigation" class="h-6 w-6"></i>
+                </div>
+                <div>
+                    <p class="text-xs font-semibold text-slate-400 uppercase tracking-wider">出発済</p>
+                    <p id="stat-done" class="text-2xl font-bold text-slate-900 mt-0.5">0</p>
+                </div>
+            </div>
+
+            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs flex items-center gap-4 relative overflow-hidden">
+                <div class="p-3.5 bg-indigo-50 text-indigo-600 rounded-xl">
+                    <i data-lucide="trending-up" class="h-6 w-6"></i>
+                </div>
+                <div>
+                    <p class="text-xs font-semibold text-slate-400 uppercase tracking-wider">進捗率</p>
+                    <p id="stat-progress" class="text-2xl font-bold text-slate-900 mt-0.5">0%</p>
+                </div>
+                <div class="absolute bottom-0 left-0 right-0 h-[3px] bg-slate-100">
+                    <div id="stat-progress-bar" class="h-full bg-indigo-600 transition-all duration-500" style="width: 0%;"></div>
+                </div>
+            </div>
+        </section>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+            
+            <section class="bg-white p-6 rounded-2xl border border-slate-200 shadow-2xs space-y-4 lg:col-span-1">
+                <div class="border-b border-slate-100 pb-3 flex items-center gap-2">
+                    <i data-lucide="plus-circle" class="h-5 w-5 text-indigo-500"></i>
+                    <h2 class="font-bold text-slate-800 text-base">新規予約・運行情報の登録</h2>
+                </div>
+                <form id="res-form" class="space-y-4">
+                    <div>
+                        <label class="block text-xs font-bold text-slate-500 mb-1">予定時刻</label>
+                        <input type="time" id="form-time" required class="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-bold text-slate-500 mb-1">お客様氏名</label>
+                        <input type="text" id="form-name" required placeholder="例: 山田 太郎" class="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-bold text-slate-500 mb-1">車種・ナンバー車両情報</label>
+                        <input type="text" id="form-car" required placeholder="例: プリウス 豊橋500 あ 12-34" class="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-bold text-slate-500 mb-1">管理メモ・備考</label>
+                        <textarea id="form-note" rows="2" placeholder="例: スタッドレス希望、ETC貸出など" class="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all resize-none"></textarea>
+                    </div>
+                    <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white font-semibold text-sm py-2.5 px-4 rounded-xl shadow-xs transition-colors cursor-pointer flex items-center justify-center gap-2">
+                        <i data-lucide="check" class="h-4 w-4"></i>
+                        <span>この内容でスケジュール登録</span>
+                    </button>
+                </form>
+            </section>
+
+            <section class="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden lg:col-span-2">
+                <div class="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
+                    <div class="flex items-center gap-2">
+                        <i data-lucide="list-ordered" class="h-5 w-5 text-indigo-500"></i>
+                        <h2 id="sheet-title" class="font-bold text-slate-800 text-base">リアルタイムクラウド共有シート</h2>
+                    </div>
+                    <span class="text-xs text-slate-400 font-medium">自動更新中 (来店チャイム有効)</span>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="bg-slate-50/70 border-b border-slate-200 text-slate-400 font-bold text-xs tracking-wider uppercase">
+                                <th class="px-6 py-3.5 w-24">時刻</th>
+                                <th class="px-6 py-3.5 w-44">氏名 (顧客)</th>
+                                <th class="px-6 py-3.5 w-56">車両情報・ナンバー</th>
+                                <th class="px-6 py-3.5 w-56">ステータス更新</th>
+                                <th class="px-6 py-3.5">備考・連絡事項</th>
+                            </tr>
+                        </thead>
+                        <tbody id="reservation-tbody" class="divide-y divide-slate-100 text-sm">
+                            </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <footer class="bg-white border-t border-slate-200 py-4 mt-auto">
+        <div class="max-w-7xl mx-auto px-4 text-center text-xs text-slate-400 font-medium">
+            &copy; 2026 Auto-Rent Group. Monitor Display System Secured by Cloud Firestore.
+        </div>
+    </footer>
+
+</body>
+</html>
